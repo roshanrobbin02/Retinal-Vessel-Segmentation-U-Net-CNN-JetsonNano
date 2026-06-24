@@ -1,0 +1,164 @@
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers, models
+import numpy as np
+import cv2
+import os
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score, f1_score, jaccard_score, matthews_corrcoef
+import os
+import numpy as np
+import cv2
+def load_fives_data(data_path, img_size=(256,256)):
+ images = []
+ masks = []
+ labels = []
+ for split in ['train', 'test']:
+ split_path = os.path.join(data_path, split)
+ orig_path = os.path.join(split_path, "Original") # Fixed folder name
+ mask_path = os.path.join(split_path, "Ground truth") # Fixed folder name
+ # Check if paths exist
+ if not os.path.exists(orig_path):
+ print(f"Warning: {orig_path} not found. Skipping...")
+ continue
+ if not os.path.exists(mask_path):
+ print(f"Warning: {mask_path} not found. Skipping...")
+ continue
+ for filename in os.listdir(orig_path):
+ if filename.endswith(('.png', '.jpg', '.jpeg')):
+ label = filename.split('_')[-1][0] # Extract label
+ if label not in ['D', 'G', 'N']:
+ continue
+ # Load and resize original image
+ img = cv2.imread(os.path.join(orig_path, filename))
+ if img is None:
+ print(f"Warning: Could not read {filename}. Skipping...")
+ continue
+ img = cv2.resize(img, img_size)
+ images.append(img)
+ labels.append(label)
+ # Load and resize corresponding mask
+ mask = cv2.imread(os.path.join(mask_path, filename), cv2.IMREAD_GRAYSCALE)
+ if mask is None:
+ print(f"Warning: Mask missing for {filename}. Skipping...")
+ continue
+ mask = cv2.resize(mask, img_size)
+ masks.append(mask) # Fixed the list appending issue
+ # Convert to NumPy arrays and normalize
+ images = np.array(images, dtype=np.float32) / 255.0
+ masks = np.array(masks, dtype=np.float32) / 255.0
+ masks = np.expand_dims(masks, axis=-1) # Add channel dimension
+ # Convert labels to numerical values
+ label_map = {'D': 0, 'G': 1, 'N': 2}
+ labels = np.array([label_map[l] for l in labels])
+ return images, masks, labels
+# ==================== U-Net Model for Segmentation ===========================
+def unet_model(input_shape=(256, 256, 3)):
+ inputs = layers.Input(input_shape)
+
+ #Encoder
+ c1 = layers.Conv2D(64,(3,3), activation='relu', padding='same')(inputs)
+ c1 = layers.Conv2D(64,(3,3), activation='relu', padding='same')(c1)
+ p1 = layers.MaxPooling2D((2, 2))(c1)
+
+ c2 = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(p1)
+ c2 = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(c2)
+ p2 = layers.MaxPooling2D((2, 2))(c2)
+
+ #Bottleneck
+ c3 = layers.Conv2D(256, (3,3), activation='relu', padding='same')(p2)
+ c3 = layers.Conv2D(256, (3,3), activation='relu', padding='same')(c3)
+
+ #Decoder
+ u1 = layers.Conv2DTranspose(128, (2, 2), strides=(2, 2), padding='same')(c3)
+ u1 = layers.concatenate([u1, c2])
+ c4 = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(u1)
+ c4 = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(c4)
+
+ u2 = layers.Conv2DTranspose(64, (2, 2), strides=(2, 2), padding='same')(c4)
+ u2 = layers.concatenate([u2, c1])
+ c5 = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(u2)
+ c5 = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(c5)
+
+ #output layer
+ output = layers.Conv2D(1, (1, 1), activation='sigmoid')(c5)
+
+ model = keras.Model(inputs, output)
+ return model
+# ===========================CNN Model For Prediction =========================
+def cnn_model(input_shape=(256, 256, 3)):
+ model = keras.Sequential([
+ layers.Conv2D(32, (3, 3), activation='relu', input_shape=input_shape),
+ layers.MaxPooling2D((2, 2)),
+ layers.Conv2D(64, (3, 3), activation='relu'),
+ layers.MaxPooling2D((2, 2)),
+ layers.Flatten(),
+ layers.Dense(128, activation='relu'),
+ layers.Dense(3, activation='softmax') #Three classes: D, G, N
+ ])
+ return model
+# =========================== Training ==================================
+if __name__ == "__main__":
+ data_path = "/kaggle/input/fives-dataset/FIVES A Fundus Image Dataset for AI-based Vessel
+Segmentation/FIVES A Fundus Image Dataset for AI-based Vessel Segmentation"
+ img_size = (256, 256)
+
+ #Load dataset
+ images, masks, labels = load_fives_data(data_path, img_size)
+ X_train, X_val, y_train, y_val = train_test_split(images, labels, test_size=0.2, random_state=42)
+ X_train_seg, X_val_seg, y_train_seg, y_val_seg = train_test_split(images, masks, test_size=0.2,
+random_state=42)
+
+ # Train U-Net (segmentation)
+ unet = unet_model(input_shape=(256, 256, 3))
+ unet.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+ unet.fit(X_train_seg, y_train_seg, validation_data=(X_val_seg, y_val_seg), epochs=10,
+batch_size=16)
+ unet.save("retinal_vessel_segmentation_unet.h5")
+ #Train CNN (Disease Prediction)
+ cnn = cnn_model(input_shape=(256, 256, 3))
+ cnn.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+ cnn.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=10, batch_size=16)
+ cnn.save("disease_prediction_cnn.h5")
+
+ print("Training complete. Models saved.")
+import cv2
+import numpy as np
+from tensorflow import keras
+import matplotlib.pyplot as plt
+# ===================prediction using plot =======================
+def predict_image(image_path):
+ #Load models
+ unet = keras.models.load_model("retinal_vessel_segmentation_unet.h5")
+ cnn = keras.models.load_model("disease_prediction_cnn.h5")
+
+ #Load and preprocess image
+ img = cv2.imread(image_path)
+ img = cv2.resize(img, (256, 256)) / 255.0
+ img = np.expand_dims(img, axis=0)
+ #predict segmentation
+ vessel_mask = unet.predict(img)[0]
+ #Enhance contrast using CLAHE
+ #clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+ #vessel_mask = (vessel_mask * 255).astype(np.uint8) #convert to uint8
+ #vessel_mask = clahe.apply(vessel_mask)
+ #predict disease
+ disease_pred = cnn.predict(img)[0] >0.5
+ classes = ['Diabetic', 'Glaucoma', 'Normal']
+ predicted_disease = classes[np.argmax(disease_pred)]
+ #show the results
+ fig, axs = plt.subplots(1, 2, figsize=(10,5))
+ axs[0].imshow(cv2.cvtColor(cv2.imread(image_path),cv2.COLOR_BGR2RGB))
+ axs[0].set_title(f'Original - {predicted_disease}')
+ axs[0].axis('off')
+ #vessel segmentation mask
+ axs[1].imshow(vessel_mask.squeeze(), cmap='gray')
+ axs[1].set_title("Vessel_Segmentation")
+ axs[1].axis('off')
+
+ plt.show()
+ return vessel_mask, predicted_disease
+mask, disease = predict_image("/kaggle/input/fives-dataset/FIVES A Fundus Image Dataset for AIbased Vessel Segmentation/FIVES A Fundus Image Dataset for AI-based Vessel
+Segmentation/test/Original/154_N.png")
+print(f"Predicted Disease: {disease}")
